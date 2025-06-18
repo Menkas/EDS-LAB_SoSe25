@@ -1,0 +1,63 @@
+# Quartus Prime Lite generated files
+
+# Project database and intermediate build files
+db/
+incremental_db/
+simulation/
+output_files/
+greybox_tmp/
+c5_pin_model_dump.txt
+
+# Temporary project/user files
+*.rpt
+*.summary
+*.smsg
+*.chg
+*.qws
+*.jdi
+*.qdf
+*.qdz
+*.qmap
+*.qmsg
+*.sld
+*.sdc~    # backup files
+*.svf
+*.pin
+*.pof
+*.sof
+*.jbc
+*.cdf
+*.pof
+*.jic
+*.hex
+*.ttf
+
+# Simulation and waveform files
+*.vcd
+*.vwf
+*.tbl
+*.wlf
+*.fsdb
+
+# Auto-save or backup files
+*~ 
+*.bak
+*.backup
+*.old
+*.swp
+*.swo
+
+# Quartus Prime system files
+__quartus_project_backup/
+*.qbk
+
+# ModelSim-Altera simulation output
+work/
+modelsim.ini
+transcript
+vsim.wlf
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
