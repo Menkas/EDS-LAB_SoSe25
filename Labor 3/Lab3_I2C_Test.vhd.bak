@@ -1,0 +1,300 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity wm8731 is
+port (
+    clk, reset : in std_logic; -- Takteingang (entsprechend 18,432 MHz fuer WM8731)
+    din        : in std_logic_vector(31 downto 0); -- Audiodaten: 16 Bit linker Kanal + 16 Bit rechter Kanal
+    i2c_sdat   : out std_logic; -- I2C serieller Datenkanal
+    i2c_sclk   : out std_logic; -- I2C serielle Clock
+    aud_xck    : out std_logic; -- WM8731 Referenztakt (siehe Register 8 Programmierung)
+    aud_bclk   : out std_logic; -- Audio Bit Clock
+    aud_dacdat : out std_logic; -- DAC Daten
+    aud_daclrck: out std_logic -- Links / Rechts
+);
+end wm8731;
+
+architecture behavioral of wm8731 is
+
+constant i2c_adr : std_logic_vector(6 downto 0) := "0011010";  -- I2C Device Adresse vom WM8731
+constant arraysize : integer := 7;
+
+-- I2C Daten: 7 Bit Registeradresse plus 9 Datenbits
+-- For this 8-bit I2C implementation, we will assume:
+--   - The 7-bit register address (bits 15 downto 9) will be sent as the lower 7 bits of an 8-bit byte.
+--   - The 9-bit data (bits 8 downto 0) will be truncated to its lower 8 bits (bits 7 downto 0) for transmission.
+type rom is array (0 to arraysize) of std_logic_vector(15 downto 0);
+constant i2c_data : rom := (
+  "0001111_000000000", -- R15 Reset Chip
+  "0000100_000010000", -- R4  DAC Sel
+  "0000101_000000000", -- R5  DAC Mute off
+  "0000110_001100111", -- R6  DAC on, out on
+  "0000111_000000011", -- R7  Slave, DSP Modus, 16 Bit, (Truncates 9-bit data to 8 bits for I2C)
+  "0001000_000000010", -- R8  Normal Modus, 384fs (18,432 Mhz, f_s = 48 kHz)
+  "0001001_000000000", -- R9  Deaktiviere Audio
+  "0001001_000000001"  -- R9  Aktiviere Audio
+);
+
+signal s_din : std_logic_vector(31 downto 0);
+signal s_lrswitch : integer range 0 to 2303; -- Used for LRCK generation
+
+-- I2C Clock Generation signals
+signal i2c_clk_div_cnt : std_logic_vector(5 downto 0); -- Counter for 18MHz/36 = 500kHz I2C clock
+signal i2c_scl_int     : std_logic; -- Internal SCL signal to control its toggling
+
+-- I2C State Machine signals
+type i2c_state_type is (
+    IDLE,                  -- Waiting to start a new transaction
+    START,                 -- Generating I2C Start condition
+    SEND_DEVICE_ADDRESS,   -- Sending 7-bit slave address + R/W bit
+    ACK_DEVICE_ADDRESS,    -- Waiting for ACK from WM8731 after device address
+    SEND_REGISTER_ADDRESS, -- Sending 8-bit register address byte (padded 7-bit addr)
+    ACK_REGISTER_ADDRESS,  -- Waiting for ACK from WM8731 after register address
+    SEND_DATA_BYTE,        -- Sending 8-bit data byte (truncated 9-bit data)
+    ACK_DATA_BYTE,         -- Waiting for ACK from WM8731 after data byte
+    STOP,                  -- Generating I2C Stop condition
+    WAIT_NEXT_WORD         -- Short delay before starting next register configuration
+);
+signal i2c_current_state : i2c_state_type;
+signal i2c_next_state    : i2c_state_type;
+
+signal i2c_bitcnt  : integer range 0 to 8;  -- Counts bits within a byte (0 to 7 for 8 bits)
+signal i2c_wordcnt : integer range 0 to arraysize; -- Counts which 16-bit word from 'rom' is being sent
+
+signal s_i2c_sdat_int : std_logic; -- Internal signal for i2c_sdat, driven by the state machine
+
+-- Audio Clock Generation signals
+signal s_bclk_div_cnt : integer range 0 to 11; -- Counter for BCLK (18.432MHz / 12 = 1.536MHz)
+signal s_bclk_int     : std_logic;            -- Internal BCLK signal
+
+signal s_lrck_div_cnt : integer range 0 to 383; -- Counter for LRCK (18.432MHz / 384 = 48kHz)
+signal s_lrck_int     : std_logic;            -- Internal LRCK signal
+
+begin
+
+-- I2C Clock Generator (approx. 500kHz from 18.432MHz)
+-- 18.432MHz / 36 = 512kHz. Toggling every 18 cycles (half period).
+process(reset, clk)
+begin
+    if (reset = '1') then
+        i2c_scl_int <= '0';
+        i2c_clk_div_cnt <= (others => '0');
+    elsif (clk'event and clk='1') then
+        if i2c_clk_div_cnt = 17 then -- Counts from 0 to 17 (18 cycles)
+            i2c_scl_int <= not (i2c_scl_int);
+            i2c_clk_div_cnt <= (others => '0');
+        else
+            i2c_clk_div_cnt <= std_logic_vector(unsigned(i2c_clk_div_cnt) + 1);
+        end if;
+    end if;
+end process;
+
+-- WM8731 I2C Interface State Machine
+process(reset, i2c_scl_int)
+begin
+    if (reset = '1') then
+        i2c_sdat <= 'Z'; -- I2C SDA is open-drain, initialize as high-impedance
+        i2c_sclk <= '1'; -- I2C SCL is high in idle state
+        i2c_current_state <= IDLE;
+        i2c_bitcnt <= 0;
+        i2c_wordcnt <= 0;
+        s_i2c_sdat_int <= '1'; -- Internal SDA default to high
+    elsif (i2c_scl_int'event and i2c_scl_int = '1') then -- On rising edge of I2C SCL
+        -- State transitions
+        i2c_current_state <= i2c_next_state;
+
+        case i2c_current_state is
+            when IDLE =>
+                i2c_sdat <= 'Z'; -- Release SDA
+                i2c_sclk <= '1'; -- Keep SCL high
+                if (i2c_wordcnt <= arraysize) then -- Process all configuration words
+                    i2c_next_state <= START;
+                else
+                    i2c_next_state <= IDLE; -- All words sent, stay in IDLE
+                end if;
+                i2c_bitcnt <= 0;
+
+            when START =>
+                -- Start condition: SDA goes low while SCL is high
+                i2c_sdat <= '0'; -- Drive SDA low
+                i2c_sclk <= '1'; -- Keep SCL high
+                i2c_next_state <= SEND_DEVICE_ADDRESS;
+                i2c_bitcnt <= 0;
+
+            when SEND_DEVICE_ADDRESS =>
+                -- Send 7-bit device address (i2c_adr) + 1-bit R/W (0 for write)
+                if (i2c_bitcnt < 8) then
+                    case i2c_bitcnt is
+                        when 0 => s_i2c_sdat_int <= i2c_adr(6);
+                        when 1 => s_i2c_sdat_int <= i2c_adr(5);
+                        when 2 => s_i2c_sdat_int <= i2c_adr(4);
+                        when 3 => s_i2c_sdat_int <= i2c_adr(3);
+                        when 4 => s_i2c_sdat_int <= i2c_adr(2);
+                        when 5 => s_i2c_sdat_int <= i2c_adr(1);
+                        when 6 => s_i2c_sdat_int <= i2c_adr(0);
+                        when 7 => s_i2c_sdat_int <= '0'; -- Write bit
+                        when others => null; -- Should not happen
+                    end case;
+                    i2c_bitcnt <= i2c_bitcnt + 1;
+                    i2c_sclk <= '0'; -- Data is valid when SCL is low, prepare for next rising edge
+                else
+                    i2c_next_state <= ACK_DEVICE_ADDRESS;
+                    i2c_bitcnt <= 0;
+                    i2c_sdat <= 'Z'; -- Release SDA for ACK
+                end if;
+                i2c_sdat <= s_i2c_sdat_int; -- Drive SDA based on internal signal
+
+            when ACK_DEVICE_ADDRESS =>
+                -- Wait for ACK from slave (SDA pulled low by slave)
+                i2c_sclk <= '1';
+                -- In a real design, you'd check i2c_sdat for '0' here.
+                -- For simplicity, we assume ACK is received.
+                i2c_next_state <= SEND_REGISTER_ADDRESS;
+                i2c_bitcnt <= 0;
+
+            when SEND_REGISTER_ADDRESS =>
+                -- Send the 7-bit register address as an 8-bit byte (MSB padded with '0')
+                if (i2c_bitcnt < 8) then
+                    case i2c_bitcnt is
+                        when 0 => s_i2c_sdat_int <= '0'; -- MSB padding
+                        when 1 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(15); -- Reg Address bits (7 bits)
+                        when 2 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(14);
+                        when 3 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(13);
+                        when 4 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(12);
+                        when 5 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(11);
+                        when 6 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(10);
+                        when 7 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(9);
+                        when others => null;
+                    end case;
+                    i2c_bitcnt <= i2c_bitcnt + 1;
+                    i2c_sclk <= '0';
+                else
+                    i2c_next_state <= ACK_REGISTER_ADDRESS;
+                    i2c_bitcnt <= 0;
+                    i2c_sdat <= 'Z'; -- Release SDA for ACK
+                end if;
+                i2c_sdat <= s_i2c_sdat_int;
+
+            when ACK_REGISTER_ADDRESS =>
+                -- Wait for ACK from slave
+                i2c_sclk <= '1';
+                i2c_next_state <= SEND_DATA_BYTE;
+                i2c_bitcnt <= 0;
+
+            when SEND_DATA_BYTE =>
+                -- Send the 8-bit data (truncating the original 9-bit data)
+                if (i2c_bitcnt < 8) then
+                    case i2c_bitcnt is
+                        when 0 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(7);
+                        when 1 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(6);
+                        when 2 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(5);
+                        when 3 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(4);
+                        when 4 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(3);
+                        when 5 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(2);
+                        when 6 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(1);
+                        when 7 => s_i2c_sdat_int <= i2c_data(i2c_wordcnt)(0);
+                        when others => null;
+                    end case;
+                    i2c_bitcnt <= i2c_bitcnt + 1;
+                    i2c_sclk <= '0';
+                else
+                    i2c_next_state <= ACK_DATA_BYTE;
+                    i2c_bitcnt <= 0;
+                    i2c_sdat <= 'Z'; -- Release SDA for ACK
+                end if;
+                i2c_sdat <= s_i2c_sdat_int;
+
+            when ACK_DATA_BYTE =>
+                -- Wait for ACK from slave
+                i2c_sclk <= '1';
+                i2c_next_state <= STOP;
+                i2c_bitcnt <= 0;
+
+            when STOP =>
+                -- Stop condition: SDA goes high while SCL is high
+                i2c_sdat <= '0'; -- Ensure SDA is low first
+                i2c_sclk <= '1';
+                i2c_next_state <= WAIT_NEXT_WORD;
+                i2c_bitcnt <= 0;
+                -- The actual stop condition (SDA rising while SCL high) happens after this state on next clock
+                -- We'll explicitly set SDA high after a short delay in the next state if needed.
+
+            when WAIT_NEXT_WORD =>
+                -- Introduce a small delay before the next word or returning to IDLE
+                i2c_sdat <= '1'; -- Complete the STOP condition by ensuring SDA is high
+                i2c_sclk <= '1';
+                if (i2c_bitcnt = 500) then -- Arbitrary delay
+                    i2c_wordcnt <= i2c_wordcnt + 1;
+                    i2c_next_state <= IDLE;
+                    i2c_bitcnt <= 0;
+                else
+                    i2c_bitcnt <= i2c_bitcnt + 1;
+                end if;
+
+        end case;
+    elsif (i2c_scl_int'event and i2c_scl_int = '0') then -- On falling edge of I2C SCL
+        -- SCL is low, data can be changed
+        if (i2c_current_state = SEND_DEVICE_ADDRESS or
+            i2c_current_state = SEND_REGISTER_ADDRESS or
+            i2c_current_state = SEND_DATA_BYTE) then
+            -- Data setup occurs here before SCL rises
+            null; -- Data is already set by the rising edge part of the process
+        end if;
+    end if;
+end process;
+
+-- WM8731 Audio Interface
+-- This section generates the BCLK, LRCK, and serializes the audio data.
+process(reset, clk)
+    -- BCLK (Bit Clock) generation: 1.536 MHz for 48kHz sample rate, 16-bit stereo (32 bits per frame)
+    -- 18.432 MHz / 1.536 MHz = 12. So, BCLK is clk / 12.
+    -- LRCK (Left/Right Clock) generation: 48 kHz
+    -- 18.432 MHz / 48 kHz = 384. So, LRCK is clk / 384.
+begin
+    if (reset = '1') then
+        s_lrswitch <= 0; -- Used for LRCK and data loading
+        s_bclk_div_cnt <= 0;
+        s_bclk_int <= '0';
+        s_lrck_div_cnt <= 0;
+        s_lrck_int <= '0';
+        s_din <= (others => '0');
+        aud_daclrck <= '0';
+        aud_bclk <= '0';
+    elsif (clk'event and clk='1') then
+        -- Generate BCLK
+        if s_bclk_div_cnt = 5 then -- Toggle every 6 clock cycles (0 to 5) for 50% duty cycle
+            s_bclk_int <= not s_bclk_int;
+            s_bclk_div_cnt <= 0;
+        else
+            s_bclk_div_cnt <= s_bclk_div_cnt + 1;
+        end if;
+
+        -- Generate LRCK (toggles at sample rate)
+        if s_lrck_div_cnt = 191 then -- Toggle every 192 clock cycles (0 to 191) for 50% duty cycle
+            s_lrck_int <= not s_lrck_int;
+            s_lrck_div_cnt <= 0;
+        else
+            s_lrck_div_cnt <= s_lrck_div_cnt + 1;
+        end if;
+
+        -- Audio Data Shifting
+        -- Data is loaded on the rising edge of LRCK and shifted out on BCLK
+        if (s_bclk_int'event and s_bclk_int = '1') then -- On rising edge of BCLK
+            -- The 'din' port is 32 bits (16 left + 16 right).
+            -- This assumes a standard I2S type where data is loaded on LRCK and shifted out.
+            if (s_lrck_int = '1' and s_bclk_div_cnt = 0) then -- Load new data at start of LR frame (approx. when LRCK is high)
+                 s_din <= din;
+            else
+                s_din <= s_din(30 downto 0) & '0'; -- Shift out MSB first
+            end if;
+        end if;
+    end if;
+end process;
+
+-- Assign internal signals to output ports
+aud_xck <= clk;
+aud_bclk <= s_bclk_int;
+aud_daclrck <= s_lrck_int;
+aud_dacdat <= s_din(31); -- Output the MSB of the shifting data
+end behavioral;
