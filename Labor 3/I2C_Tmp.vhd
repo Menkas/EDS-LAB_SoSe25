@@ -44,6 +44,8 @@ Signal test_ACK : std_logic := '0';
 
 Signal i2c_clk : std_logic := 'X';
 signal i2c_clkdiv : std_logic_vector(5 downto 0);
+Signal i2c_seq: integer range 0 to 2;
+
 -- create a signal for the extra count
 
 -- I2C Daten: 7 Bit Registeradresse plus 9 Datenbits 
@@ -98,45 +100,64 @@ BEGIN
 	end process;
 	
 	-- I2C State Machine
-	PROCESS(reset, i2c_clk, i2c_bitcnt, i2c_wordcnt)
+	PROCESS(reset, i2c_clk)
 	BEGIN	
-		if (reset = '1') then
-			i2c_sdat <= '0';	
-			i2c_sclk <= '0';
-			i2c_bitcnt <= 0;
-			i2c_wordcnt <= 0;	
+		if (reset = '1') then	
+			next_bitcnt <= 0;
+			next_wordcnt <= 0;
+			i2c_sclk <= 'Z';
 			i2c_sdat <= 'Z';
 			Zustand <= IDLE;
-			next_bitcnt <= i2c_bitcnt;
-			next_wordcnt <= i2c_wordcnt;
+			i2c_seq <= 0;
 		elsif (i2c_clk'event and i2c_clk='1') then 
 	-- Default values 
-			i2c_bitcnt <= next_bitcnt;
-			i2c_wordcnt <= next_wordcnt;
+			Zustand <= Folgezustand;
 			
+			IF (Zustand /= START) AND (ZUSTAND /= IDLE) AND (ZUSTAND /= STOP) THEN
+				case I2c_seq is
+					when 0 => --i2c_sdat <= '1';
+						i2c_sclk <= '0';
+						i2c_seq <= i2c_seq + 1;
+					when 1 => 
+						i2c_sclk <= '0';
+						i2c_seq <= i2c_seq + 1;
+					when 2 => 
+						i2c_sclk <= '1';
+						i2C_seq <= 0;
+					when others => Folgezustand <= IDLE;
+				end case;
+			END IF;
+			
+ 
 			case Zustand is
 			when IDLE => 
-							i2c_sdat <= '1';
-							i2c_sclk <= '1';
-							Folgezustand <= START;			
+				Folgezustand <= START;			
 								
 			when START => 	
-								i2c_sdat <= '0';
-								i2c_sclk <= '1';
-								Folgezustand <= SEND_ADDRESS;
+				case I2c_seq is
+					when 0 => i2c_sdat <= '0';
+						i2c_seq <= i2c_seq + 1;
+					when 1 => i2c_sclk <= '0';
+						i2c_seq <= i2c_seq + 1;
+					when 2 => Folgezustand <= SEND_ADDRESS;
+						i2c_seq <= 0;
+					when others => Folgezustand <= IDLE;
+				end case;
+				
+				
 			when SEND_ADDRESS => 	
 					case i2c_bitcnt is
 						when 7 => i2c_sdat <= '0'; -- R/W Bit
-												 next_bitcnt <= next_bitcnt + 1;
-												 Folgezustand <= SEND_ADDRESS;
+							next_bitcnt <= next_bitcnt + 1;
+							Folgezustand <= SEND_ADDRESS;
 						when 8 => i2c_sdat <= test_ACK;--'Z';
-												 Folgezustand <= ACK;
-												 next_bitcnt <= 0;
+							next_bitcnt <= 0;
+							Folgezustand <= ACK;
 						when others => i2c_sdat <= i2c_adr((arraysize-1) - i2c_bitcnt);
-														next_bitcnt <= next_bitcnt + 1;
-														Folgezustand <= SEND_ADDRESS;
-				end case;
-				i2c_sclk <= '0';		
+							next_bitcnt <= next_bitcnt + 1;
+							Folgezustand <= SEND_ADDRESS;
+					end case;
+					
 				when SENDDATA => 
 					case i2c_bitcnt is
 						when 15 => next_wordcnt <= next_wordcnt + 1;
@@ -153,8 +174,6 @@ BEGIN
 											Folgezustand <= SENDDATA;
 											next_bitcnt <= next_bitcnt + 1;
 					end case;
-
-					
 					
 				when ACK => 
 					case i2c_sdat is
@@ -171,7 +190,6 @@ BEGIN
 											Folgezustand <= SENDDATA;
 					END CASE;
 					i2c_sdat <= 'Z';
-					i2c_sclk <= '0';
 	--				IF i2c_wordcnt < arraysize then
 	--					Folgezustand <= SENDDATA;
 	--					i2c_sdat <= 'Z';
@@ -189,7 +207,8 @@ BEGIN
 								i2c_sdat <= 'Z'; 
 								i2c_sclk <= 'Z';
 			END CASE;	
-	end if;	
-	Zustand <= Folgezustand;
+	end if;
+	i2c_bitcnt <= next_bitcnt;
+	i2c_wordcnt <= next_wordcnt;
 	end Process;
 END behavioral;
