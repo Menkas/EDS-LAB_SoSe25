@@ -6,10 +6,11 @@ ENTITY I2C_Tmp IS
 PORT(
 ----------------------------------------
 -- In
-		clk, reset : IN STD_LOGIC;
+		clk, reset, EN : IN STD_LOGIC;
 --		din : IN STD_LOGIC_VECTOR(31 downto 0);
 ----------------------------------------
 -- Out
+		LED : out std_logic;
 		i2c_sdat : inout std_logic; -- I2C serieller Datenkanal	
 		i2c_sclk : out std_logic -- I2C serielle Clock
 );
@@ -43,6 +44,7 @@ signal stage : integer range 0 to 1 := 0; -- 2
 Signal i2c_clk : std_logic := 'X';
 signal i2c_clkdiv : std_logic_vector(5 downto 0);
 Signal i2c_seq: integer range 0 to 2;
+Signal wordend: std_logic := '0';
 
 SIGNAL DEMO_12: std_logic;
 Signal test_ACK : std_logic := '0';
@@ -73,6 +75,7 @@ constant i2c_data : rom := (
 
 procedure fsm_step(
 	signal Zustand     	: inout I2C_States;
+	signal en				: in std_logic;
 	signal i2c_sdat    	: inout std_logic;
 	signal i2c_sclk    	: out std_logic;
 	signal i2c_seq     	: inout integer range 0 to 2;
@@ -81,15 +84,23 @@ procedure fsm_step(
 	signal i2c_wordcnt 	: inout integer range 0 to arraysize+1;
 	signal index		 	: inout integer;
 	signal stage 			: inout integer range 0 to 1;
-	signal test_ACK    	: in std_logic
+	signal test_ACK    	: inout std_logic;
+	signal wordend			: inout std_logic;
+	signal LED 				: out std_logic
 ) is
 begin
 	case Zustand is
-	
 		when IDLE => 
-			Zustand <= START;			
-						
+			IF EN = '1' THEN
+				Zustand <= START;		
+				LED <= '0';
+			ELSE 
+				Zustand <= IDLE;
+			END IF;		
+			
+			
 		when START => 	
+			LED <= '0';
 			case I2c_seq is
 				when 0 => i2c_sdat <= '0';
 					i2c_seq <= i2c_seq + 1;
@@ -117,23 +128,29 @@ begin
 						Zustand <= SEND_ADDRESS;
 				end case;
 				
+				
 			when WAIT_FOR_NEXT_STATE =>
 				CASE i2c_wordcnt is
-					when arraysize+1 => Zustand <= STOP;
+					when 8 =>
+						Zustand <= STOP;
 						i2c_wordcnt <= 0;
 					when others => 
-						Zustand <= SENDDATA;
-						IF(i2c_bitcnt = 0) THEN
+						IF(wordend = '1') then 
+							wordend <= '0';
+							Zustand <= STOP;
+						ELSIF(i2c_bitcnt = 0) THEN
 							i2c_sdat <= i2c_data(i2c_wordcnt)(15);
 							i2c_bitcnt <= i2c_bitcnt + 1;
 							index <= index - 1;
+							Zustand <= SENDDATA;
 						ELSIF(i2c_bitcnt = 8) THEN
 							i2c_sdat <= i2c_data(i2c_wordcnt)(7);
 							i2c_bitcnt <= i2c_bitcnt + 1;
 							index <= index - 1;
-						END IF;
-						
+							Zustand <= SENDDATA;
+						END IF;		
 				END CASE;
+				
 				
 			when SENDDATA => 
 				case i2c_bitcnt is
@@ -194,6 +211,7 @@ begin
 							stage <= 1;
 						ELSE
 							i2c_bitcnt <= 0;
+							wordend <= '1';
 							i2c_wordcnt <= i2c_wordcnt +1;
 							i2c_sdat <= test_ACK;
 							ZUSTAND <= ACK;
@@ -212,17 +230,26 @@ begin
 				stage <= 0;
 			
 
-			when STOP => Zustand <= IDLE;
+			when STOP => 
 				case I2c_seq is
-					when 0 => i2c_sdat <= '1';
+					when 0 => 
+						i2c_sclk <= '1';
+						i2c_sdat <= '0';
 						i2c_seq <= i2c_seq + 1;
-					when 1 => i2c_sclk <= '1';
+					when 1 => 
+						i2c_sclk <= '1';
+						i2c_sdat <= '1';
 						i2c_seq <= i2c_seq + 1;
-					when 2 => Zustand <= IDLE;
+					when 2 => 
+						IF(EN = '0') THEN
+							Zustand <= Start;
+						ELSE
+							ZUSTAND <= IDLE;
+						END IF;
 						i2c_seq <= 0;
+						LED <= '1';
 					when others => Zustand <= IDLE;
 				end case;
-		
 		when others => Zustand <= IDLE; 
 							i2c_sdat <= 'Z'; 
 							i2c_sclk <= 'Z';
@@ -232,6 +259,7 @@ end procedure;
 procedure INK_I2C_SEQ_WS
 (
 	signal Zustand     	: inout I2C_States;
+	signal en				: in std_logic;
 	signal i2c_sdat    	: inout std_logic;
 	signal i2c_sclk    	: out std_logic;
 	signal i2c_seq     	: inout integer range 0 to 2;
@@ -240,14 +268,16 @@ procedure INK_I2C_SEQ_WS
 	signal i2c_wordcnt 	: inout integer range 0 to arraysize+1;
 	signal index		 	: inout integer;
 	signal stage 			: inout integer range 0 to 1;
-	signal test_ACK    	: in std_logic
+	signal test_ACK    	: inout std_logic;
+	signal wordend			: inout std_logic;
+	signal LED 				: out std_logic
 ) IS
 BEGIN
 	case i2c_seq is
 		WHEN 0 => i2c_seq <= 1;
 			i2c_sclk <= '0';
 		WHEN 1 => i2c_seq <= 2;
-			fsm_step(Zustand, i2c_sdat, i2c_sclk, i2c_seq, i2c_bitcnt, next_bitcnt, i2c_wordcnt, index, stage, test_ACK);
+			fsm_step(Zustand, EN, i2c_sdat, i2c_sclk, i2c_seq, i2c_bitcnt, next_bitcnt, i2c_wordcnt, index, stage, test_ACK, wordend, LED);
 		WHEN 2 => i2c_seq <= 0;
 			i2c_sclk <= '0';
 	END CASE;
@@ -283,10 +313,11 @@ BEGIN
 			i2c_sdat <= 'Z';
 			Zustand <= IDLE;
 			i2c_seq <= 0;
+			LED <= '0';
 		elsif (i2c_clk'event and i2c_clk='1') then 
 	-- Default values 
 			IF (Zustand = WAIT_FOR_NEXT_STATE) THEN
-					INK_I2C_SEQ_WS(Zustand, i2c_sdat, i2c_sclk, i2c_seq, i2c_bitcnt, next_bitcnt, i2c_wordcnt, index, stage, test_ACK);
+					INK_I2C_SEQ_WS(Zustand, EN, i2c_sdat, i2c_sclk, i2c_seq, i2c_bitcnt, next_bitcnt, i2c_wordcnt, index, stage, test_ACK, wordend, LED);
 					i2c_sclk <= '0';	
 			ELSIF ((Zustand /= START) AND (ZUSTAND /= IDLE) AND (ZUSTAND /= STOP)) THEN
 				case I2c_seq is
@@ -295,7 +326,7 @@ BEGIN
 						i2c_seq <= i2c_seq + 1;
 					when 1 => 
 						i2c_sclk <= '0';
-						fsm_step(Zustand, i2c_sdat, i2c_sclk, i2c_seq, i2c_bitcnt, next_bitcnt, i2c_wordcnt, index, stage, test_ACK);
+						fsm_step(Zustand, EN, i2c_sdat, i2c_sclk, i2c_seq, i2c_bitcnt, next_bitcnt, i2c_wordcnt, index, stage, test_ACK, wordend, LED);
 						i2c_seq <= i2c_seq + 1;
 					when 2 => 
 						i2c_sclk <= '1';
@@ -304,7 +335,7 @@ BEGIN
 				end case;			
 				
 			ELSE
-				fsm_step(Zustand, i2c_sdat, i2c_sclk, i2c_seq, i2c_bitcnt, next_bitcnt, i2c_wordcnt, index, stage, test_ACK);
+				fsm_step(Zustand, EN, i2c_sdat, i2c_sclk, i2c_seq, i2c_bitcnt, next_bitcnt, i2c_wordcnt, index, stage, test_ACK, wordend, LED);
 			END IF;
 		end if;
 	end Process;
