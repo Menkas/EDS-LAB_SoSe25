@@ -7,7 +7,6 @@ PORT(
 ----------------------------------------
 -- In
 		clk, reset, EN : IN STD_LOGIC;
---		din : IN STD_LOGIC_VECTOR(31 downto 0);
 ----------------------------------------
 -- Out
 		LED : out std_logic;
@@ -132,25 +131,28 @@ begin
 			when WAIT_FOR_NEXT_STATE =>
 				CASE i2c_wordcnt is
 					when 8 =>
+						I2c_seq <= 0;
 						Zustand <= STOP;
-						i2c_wordcnt <= 0;
 					when others => 
 						IF(wordend = '1') then 
 							wordend <= '0';
+							I2c_seq <= 0;
+							--i2c_sclk <= '1';
 							Zustand <= STOP;
 						ELSIF(i2c_bitcnt = 0) THEN
 							i2c_sdat <= i2c_data(i2c_wordcnt)(15);
 							i2c_bitcnt <= i2c_bitcnt + 1;
 							index <= index - 1;
 							Zustand <= SENDDATA;
+							i2c_sclk <= '0';
 						ELSIF(i2c_bitcnt = 8) THEN
 							i2c_sdat <= i2c_data(i2c_wordcnt)(7);
 							i2c_bitcnt <= i2c_bitcnt + 1;
 							index <= index - 1;
 							Zustand <= SENDDATA;
+							i2c_sclk <= '0';
 						END IF;		
 				END CASE;
-				
 				
 			when SENDDATA => 
 				case i2c_bitcnt is
@@ -231,25 +233,31 @@ begin
 			
 
 			when STOP => 
-				case I2c_seq is
-					when 0 => 
+				IF wordend = '1' AND i2c_seq = 2 then
 						i2c_sclk <= '1';
-						i2c_sdat <= '0';
-						i2c_seq <= i2c_seq + 1;
-					when 1 => 
-						i2c_sclk <= '1';
-						i2c_sdat <= '1';
-						i2c_seq <= i2c_seq + 1;
-					when 2 => 
-						IF(EN = '0') THEN
-							Zustand <= Start;
-						ELSE
-							ZUSTAND <= IDLE;
-						END IF;
-						i2c_seq <= 0;
 						LED <= '1';
-					when others => Zustand <= IDLE;
-				end case;
+				ELSE
+					case I2c_seq is
+						when 0 => 
+							i2c_sclk <= '1';
+							i2c_sdat <= '0';
+							i2c_seq <= i2c_seq + 1;
+						when 1 => 
+							i2c_sclk <= '1';
+							i2c_sdat <= '1';
+							i2c_seq <= i2c_seq + 1;
+						when 2 => 
+							IF(i2c_wordcnt <= 7) THEN
+								Zustand <= IDLE;
+							ELSE
+								ZUSTAND <= STOP;
+							END IF;
+							i2c_seq <= 0;
+							LED <= '1';
+						when others => Zustand <= IDLE;
+					end case;
+				END IF;
+				
 		when others => Zustand <= IDLE; 
 							i2c_sdat <= 'Z'; 
 							i2c_sclk <= 'Z';
@@ -318,7 +326,7 @@ BEGIN
 	-- Default values 
 			IF (Zustand = WAIT_FOR_NEXT_STATE) THEN
 					INK_I2C_SEQ_WS(Zustand, EN, i2c_sdat, i2c_sclk, i2c_seq, i2c_bitcnt, next_bitcnt, i2c_wordcnt, index, stage, test_ACK, wordend, LED);
-					i2c_sclk <= '0';	
+						
 			ELSIF ((Zustand /= START) AND (ZUSTAND /= IDLE) AND (ZUSTAND /= STOP)) THEN
 				case I2c_seq is
 					when 0 => --i2c_sdat <= '1';
