@@ -1,0 +1,198 @@
+--LIBRARY IEEE;
+--USE IEEE.STD_LOGIC_1164.ALL;
+--USE IEEE.NUMERIC_STD.ALL;
+--
+--entity wm8731_lab3_Gemini is
+--port (
+--    --// General Inputs
+--    clk         : in  std_logic; -- System Clock (e.g., 50 MHz)
+--    reset       : in  std_logic;
+--    KEY         : in  std_logic_vector(3 downto 0); -- Note selection Buttons (Active Low)
+--    EN          : in  std_logic; -- Enable for I2C
+--
+--    --// General Outputs
+--    LED         : out std_logic_vector(3 downto 0); -- LED indicator for selected note
+--
+--    --// I2C Interface for WM8731 Configuration
+--    i2c_sdat    : inout std_logic;
+--    i2c_sclk    : out std_logic;
+--
+--    --// Audio Interface for WM8731
+--    aud_xck     : out std_logic; -- Master Clock to Codec (e.g., 12.288 MHz)
+--    aud_bclk    : out std_logic; -- Audio Bit Clock (Serial Clock)
+--    aud_dacdat  : out std_logic; -- DAC Serial Data
+--    aud_daclrck : out std_logic  -- DAC Left/Right Frame Clock
+--);
+--end wm8731_lab3_Gemini;
+--
+--architecture behavioral of wm8731_lab3_Gemini is
+--
+--    -- I2C Component for initializing the WM8731 codec
+--    COMPONENT I2C_TMP IS
+--        PORT(
+--            clk, reset, EN : IN  STD_LOGIC;
+--            LED            : out std_logic;
+--            i2c_sdat       : inout std_logic;
+--            i2c_sclk       : out std_logic
+--        );
+--    END COMPONENT;
+--
+--    --============= Constants =============--
+--    constant F_SYS_CLK      : integer := 50_000_000;
+--    constant F_MCLK         : integer := 12_288_000;
+--    constant F_SAMPLE       : integer := 48_000;
+--    constant C6_TOGGLE_COUNT : integer := F_SAMPLE / (2 * 1047);
+--    constant E6_TOGGLE_COUNT : integer := F_SAMPLE / (2 * 1319);
+--    constant G6_TOGGLE_COUNT : integer := F_SAMPLE / (2 * 1568);
+--    constant C7_TOGGLE_COUNT : integer := F_SAMPLE / (2 * 2093);
+--    constant AMPLITUDE      : signed(15 downto 0) := to_signed(24575, 16);
+--    constant SILENCE        : signed(15 downto 0) := (others => '0');
+--
+--    --============= Signals =============--
+--    --// Internal signals for clock generation (FIX for Error 10309)
+--    signal aud_xck_s        : std_logic := '0';
+--    signal aud_bclk_s       : std_logic := '0';
+--    signal aud_daclrck_s    : std_logic := '0';
+--
+--    --// Clock Generation Counters
+--    signal mclk_cnt         : integer range 0 to (F_SYS_CLK / F_MCLK) - 1 := 0;
+--    signal bclk_cnt         : integer range 0 to (F_MCLK / (F_SAMPLE*32)) - 1 := 0;
+--    signal lrck_cnt         : integer range 0 to 31 := 0;
+--
+--    --// Tone Generation
+--    signal tone_toggle_count : integer := 0;
+--    signal sample_counter    : integer := 0;
+--    signal square_wave_state : std_logic := '0';
+--
+--    --// Audio Data
+--    signal audio_sample      : signed(15 downto 0) := SILENCE;
+--    signal audio_data_left   : std_logic_vector(15 downto 0);
+--    signal audio_data_right  : std_logic_vector(15 downto 0);
+--    signal i2c_led_status    : std_logic;
+--
+--BEGIN
+--
+--    --============= I2C Codec Initialization =============--
+--    init_I2C: COMPONENT I2C_TMP
+--        PORT MAP(
+--            clk      => clk,
+--            reset    => reset,
+--            EN       => EN,
+--            LED      => i2c_led_status,
+--            i2c_sdat => i2c_sdat,
+--            i2c_sclk => i2c_sclk
+--        );
+--
+--    --============= Audio Clock Generation =============--
+--    -- Logic is performed on internal "_s" signals
+--    Clock_Generator: process(clk, reset)
+--    begin
+--        if (reset = '1') then
+--            aud_xck_s     <= '0';
+--            aud_bclk_s    <= '0';
+--            aud_daclrck_s <= '0';
+--            mclk_cnt    <= 0;
+--            bclk_cnt    <= 0;
+--            lrck_cnt    <= 0;
+--        elsif (rising_edge(clk)) then
+--            -- 1. Generate aud_xck (Master Clock)
+--            if (mclk_cnt = (F_SYS_CLK / F_MCLK / 2) - 1) then
+--                aud_xck_s <= not aud_xck_s;
+--                mclk_cnt <= 0;
+--            else
+--                mclk_cnt <= mclk_cnt + 1;
+--            end if;
+--
+--            -- 2. Generate aud_bclk and aud_daclrck from aud_xck
+--            if (mclk_cnt = 0) then
+--                if (bclk_cnt = (F_MCLK / (F_SAMPLE*32) / 2) - 1) then
+--                    aud_bclk_s <= not aud_bclk_s;
+--                    bclk_cnt <= 0;
+--                    
+--                    if aud_bclk_s = '1' then -- Now reading the internal signal
+--                        if lrck_cnt = 31 then
+--                            lrck_cnt <= 0;
+--                            aud_daclrck_s <= not aud_daclrck_s;
+--                        else
+--                            lrck_cnt <= lrck_cnt + 1;
+--                        end if;
+--                    end if;
+--                else
+--                    bclk_cnt <= bclk_cnt + 1;
+--                end if;
+--            end if;
+--        end if;
+--    end process Clock_Generator;
+--    
+--    --============= Concurrent assignment to output ports =============--
+--    -- Connect the internal signals to the actual output ports
+--    aud_xck     <= aud_xck_s;
+--    aud_bclk    <= aud_bclk_s;
+--    aud_daclrck <= aud_daclrck_s;
+--
+--
+--    --============= Note Selection & Priority Logic =============--
+--    Button_Logic: process(KEY)
+--    begin
+--        if KEY(0) = '0' then
+--            tone_toggle_count <= C7_TOGGLE_COUNT;
+--            LED <= "0001";
+--        elsif KEY(1) = '0' then
+--            tone_toggle_count <= G6_TOGGLE_COUNT;
+--            LED <= "0010";
+--        elsif KEY(2) = '0' then
+--            tone_toggle_count <= E6_TOGGLE_COUNT;
+--            LED <= "0100";
+--        elsif KEY(3) = '0' then
+--            tone_toggle_count <= C6_TOGGLE_COUNT;
+--            LED <= "1000";
+--        else
+--            tone_toggle_count <= 0;
+--            LED <= "0000";
+--        end if;
+--    end process Button_Logic;
+--
+--
+--    --============= Square Wave Generation =============--
+--    -- Use the internal signal aud_daclrck_s as the clock
+--    Generate_Wave: process(aud_daclrck_s, reset)
+--    begin
+--        if reset = '1' then
+--            sample_counter    <= 0;
+--            square_wave_state <= '0';
+--        elsif rising_edge(aud_daclrck_s) then
+--            if tone_toggle_count = 0 then
+--                sample_counter <= 0;
+--            elsif sample_counter >= tone_toggle_count - 1 then
+--                sample_counter    <= 0;
+--                square_wave_state <= not square_wave_state;
+--            else
+--                sample_counter <= sample_counter + 1;
+--            end if;
+--        end if;
+--    end process Generate_Wave;
+--
+--    audio_sample <= AMPLITUDE when square_wave_state = '1' and tone_toggle_count /= 0 else
+--                    -AMPLITUDE when square_wave_state = '0' and tone_toggle_count /= 0 else
+--                    SILENCE;
+--
+--    audio_data_left  <= std_logic_vector(audio_sample);
+--    audio_data_right <= std_logic_vector(audio_sample);
+--
+--
+--    --============= Left-Justified Serializer =============--
+--    -- Use the internal signal aud_bclk_s as the clock
+--    Serializer: process(aud_bclk_s, reset)
+--    begin
+--        if reset = '1' then
+--            aud_dacdat <= '0';
+--        elsif falling_edge(aud_bclk_s) then
+--            if aud_daclrck_s = '0' then -- Left Channel
+--                aud_dacdat <= audio_data_left(15 - lrck_cnt(4 downto 0));
+--            else -- Right Channel
+--                aud_dacdat <= audio_data_right(15 - lrck_cnt(4 downto 0));
+--            end if;
+--        end if;
+--    end process Serializer;
+--
+--END behavioral;
